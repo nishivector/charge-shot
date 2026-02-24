@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Charge Shot</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; }
+    canvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; touch-action: none; }
+    #startScreen {
+      position: fixed; inset: 0;
+      background: linear-gradient(180deg, rgba(0,5,15,0.88) 0%, rgba(0,2,8,0.65) 100%);
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      z-index: 10; cursor: pointer;
+    }
+    #startScreen.hidden { opacity: 0; pointer-events: none; transition: opacity 0.6s; }
+    #gameUI {
+      position: fixed; top: 20px; left: 20px; color: #00FF88; font-family: 'Courier New', monospace;
+      font-size: 16px; z-index: 5; text-shadow: 0 0 10px #00FF88;
+    }
+    #chargeMeter {
+      position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
+      width: 200px; height: 12px; border: 2px solid #00FF88; border-radius: 6px;
+      z-index: 5; overflow: hidden;
+    }
+    #chargeFill {
+      height: 100%; width: 0%; background: linear-gradient(90deg, #00FF88, #FFFFFF);
+      transition: width 0.05s; box-shadow: 0 0 15px #00FF88;
+    }
+    #levelIndicator {
+      position: fixed; top: 20px; right: 20px; color: #FFB347; font-family: 'Courier New', monospace;
+      font-size: 18px; z-index: 5; text-shadow: 0 0 10px #FFB347;
+    }
+    #lives {
+      position: fixed; top: 50px; left: 20px; color: #FF6B6B; font-family: 'Courier New', monospace;
+      font-size: 16px; z-index: 5;
+    }
+    #creditsScreen {
+      position: fixed; inset: 0;
+      background: linear-gradient(180deg, rgba(0,5,15,0.95) 0%, rgba(0,2,8,0.9) 100%);
+      display: none; flex-direction: column; align-items: center; justify-content: center;
+      z-index: 20; color: #fff; font-family: 'Courier New', monospace;
+      cursor: pointer;
+    }
+    #creditsScreen.active { display: flex; }
+    #creditsScreen h1 { font-size: 32px; margin-bottom: 20px; color: #00FF88; text-shadow: 0 0 20px #00FF88; }
+    #creditsScreen p { font-size: 16px; margin: 8px 0; color: #aaa; }
+    #creditsScreen .score { font-size: 24px; color: #FFB347; margin: 20px 0; }
+    .title-text { font-size: 48px; color: #00FF88; text-shadow: 0 0 30px #00FF88, 0 0 60px #00FF88; margin-bottom: 10px; font-family: 'Courier New', monospace; }
+    .subtitle-text { font-size: 18px; color: #FFB347; margin-bottom: 40px; font-family: 'Courier New', monospace; }
+    .hint-text { font-size: 14px; color: rgba(255,255,255,0.5); margin-top: 30px; font-family: 'Courier New', monospace; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/tone@15.1.22/dist/Tone.js"></script>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <canvas id="gameCanvas"></canvas>
+  
+  <div id="startScreen">
+    <div class="title-text">CHARGE SHOT</div>
+    <div class="subtitle-text">Hold. Aim. Fire. Anticipate.</div>
+    <div class="hint-text">[ TAP TO BEGIN ]</div>
+  </div>
+
+  <div id="gameUI">
+    <div>SCORE: <span id="scoreVal">0</span></div>
+    <div>HIGH: <span id="highVal">0</span></div>
+  </div>
+  
+  <div id="levelIndicator">LEVEL <span id="levelVal">1</span></div>
+  <div id="lives">♥♥♥</div>
+  
+  <div id="chargeMeter"><div id="chargeFill"></div></div>
+
+  <div id="creditsScreen">
+    <h1 id="endTitle">GAME OVER</h1>
+    <p id="endScore" class="score">Score: 0</p>
+    <p>High Score: <span id="endHigh">0</span></p>
+    <p id="endMessage" style="margin-top: 20px; color: #00FF88;"></p>
+    <p class="hint-text" style="margin-top: 40px;">[ TAP TO RESTART ]</p>
+  </div>
+
+  <a href="https://github.com/nishivector/charge-shot" target="_blank" style="position:fixed;bottom:16px;right:16px;color:rgba(255,255,255,0.4);font-size:12px;text-decoration:none;font-family:monospace;z-index:1000;">GitHub ↗</a>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+    import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+    import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+    const SCORE_KEY = 'charge-shot-highscore';
+    function getHighScore() { return parseInt(localStorage.getItem(SCORE_KEY) || '0'); }
+    function saveHighScore(s) { if (s > getHighScore()) localStorage.setItem(SCORE_KEY, s); }
+
+    // Game State
+    let gameState = 'start';
+    let score = 0;
+    let lives = 3;
+    let currentLevel = 1;
+    let charge = 0;
+    let isCharging = false;
+    let playerX = 0;
+    let cameraShake = 0;
+    let formationDestroyed = false;
+
+    // Three.js Setup
+    const canvas = document.getElementById('gameCanvas');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+    const aspect = window.innerWidth / window.innerHeight;
+    const camera = new THREE.PerspectiveCamera(60, aspect, 0.1, 1000);
+    camera.position.set(0, 0, 12);
+    if (aspect < 1) { camera.position.z = 16; camera.fov = 50; camera.updateProjectionMatrix(); }
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000005);
+
+    // Post-processing
+    const composer = new EffectComposer(renderer);
+    const renderPass = new RenderPass(scene, camera);
+    composer.addPass(renderPass);
+    const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.2, 0.4, 0.85);
+    composer.addPass(bloomPass);
+
+    // Lighting
+    const ambientLight = new THREE.AmbientLight(0x222233, 0.5);
+    scene.add(ambientLight);
+
+    // Player Ship
+    const playerGroup = new THREE.Group();
+    const shipGeom = new THREE.BufferGeometry();
+    const shipVerts = new Float32Array([
+      0, 0.8, 0,   -0.3, -0.5, 0.2,   0.3, -0.5, 0.2,
+      0, 0.8, 0,   0.3, -0.5, 0.2,    0.3, -0.5, -0.2,
+      0, 0.8, 0,   0.3, -0.5, -0.2,  -0.3, -0.5, -0.2,
+      0, 0.8, 0,  -0.3, -0.5, -0.2,  -0.3, -0.5, 0.2,
+      -0.3, -0.5, 0.2,  0.3, -0.5, 0.2,  0.3, -0.5, -0.2,
+      -0.3, -0.5, 0.2,  0.3, -0.5, -0.2, -0.3, -0.5, -0.2
+    ]);
+    shipGeom.setAttribute('position', new THREE.BufferAttribute(shipVerts, 3));
+    const shipMat = new THREE.MeshBasicMaterial({ color: 0x00FF88, side: THREE.DoubleSide });
+    const shipMesh = new THREE.Mesh(shipGeom, shipMat);
+    playerGroup.add(shipMesh);
+    playerGroup.position.set(0, -4, 0);
+    scene.add(playerGroup);
+
+    // Charge Glow
+    const glowGeom = new THREE.SphereGeometry(0.6, 16, 16);
+    const glowMat = new THREE.MeshBasicMaterial({ color: 0x00FF88, transparent: true, opacity: 0 });
+    const glowMesh = new THREE.Mesh(glowGeom, glowMat);
+    playerGroup.add(glowMesh);
+
+    // Enemy formations
+    let formations = [];
+    let particles = [];
+    let floatingTexts = [];
+    let beamMesh = null;
+
+    // Level configs
+    const levelConfigs = [
+      { name: "First Contact", enemyCount: 4, spread: 3, shiftSpeed: 0, shiftType: 'none' },
+      { name: "Tightening Web", enemyCount: 6, spread: 4, shiftSpeed: 0.3, shiftType: 'tighten' },
+      { name: "Expanding Grid", enemyCount: 8, spread: 2, shiftSpeed: 0.25, shiftType: 'spread' },
+      { name: "Shifting Patterns", enemyCount: 10, spread: 4, shiftSpeed: 0.4, shiftType: 'mixed' },
+      { name: "The Hive", enemyCount: 15, spread: 3.5, shiftSpeed: 0.5, shiftType: 'chaos' }
+    ];
+
+    function createFormation(level) {
+      const config = levelConfigs[Math.min(level - 1, levelConfigs.length - 1)];
+      formations.forEach(f => scene.remove(f.group));
+      formations = [];
+      formationDestroyed = false;
+
+      const group = new THREE.Group();
+      const enemyGeom = new THREE.OctahedronGeometry(0.3, 0);
+      const enemyMat = new THREE.MeshBasicMaterial({ color: 0xFFB347 });
+
+      for (let i = 0; i < config.enemyCount; i++) {
+        const enemy = new THREE.Mesh(enemyGeom, enemyMat.clone());
+        const angle = (i / config.enemyCount) * Math.PI * 2;
+        const radius = config.spread * 0.5;
+        enemy.position.set(Math.cos(angle) * radius, Math.sin(angle) * radius + 2, 0);
+        enemy.userData = { 
+          baseAngle: angle, 
+          baseRadius: radius,
+          phase: Math.random() * Math.PI * 2,
+          alive: true 
+        };
+        group.add(enemy);
+      }
+
+      group.position.set(0, 3, 0);
+      scene.add(group);
+      formations.push({ group, config, level });
+    }
+
+    function updateFormations(time, delta) {
+      formations.forEach(f => {
+        if (formationDestroyed) return;
+        const { config } = f;
+        
+        f.group.children.forEach((enemy, i) => {
+          if (!enemy.userData.alive) return;
+          
+          const { baseAngle, baseRadius, phase } = enemy.userData;
+          let radius = baseRadius;
+          let angle = baseAngle;
+
+          // Formation movement
+          const shiftT = time * config.shiftSpeed;
+          if (config.shiftType === 'tighten') {
+            radius = baseRadius * Math.max(0.3, 1 - shiftT * 0.5);
+          } else if (config.shiftType === 'spread') {
+            radius = baseRadius * (1 + shiftT * 0.3);
+          } else if (config.shiftType === 'mixed') {
+            radius = baseRadius * (1 + Math.sin(shiftT + i) * 0.3);
+          } else if (config.shiftType === 'chaos') {
+            radius = baseRadius * (1 + Math.sin(shiftT * 2 + i * 0.5) * 0.4);
+            angle += Math.sin(shiftT + i * 0.3) * 0.2;
+          }
+
+          enemy.position.x = Math.cos(angle + time * 0.2) * radius;
+          enemy.position.y = Math.sin(angle + time * 0.2) * radius + 2 + Math.sin(time * 2 + phase) * 0.2;
+          
+          // Breathing effect
+          const scale = 1 + Math.sin(time * 3 + phase) * 0.1;
+          enemy.scale.setScalar(scale);
+        });
+      });
+    }
+
+    // Beam
+    function fireBeam(power) {
+      const beamWidth = 0.2 + power * 1.5;
+      const beamLength = 15;
+      
+      if (beamMesh) scene.remove(beamMesh);
+      
+      const beamGeom = new THREE.PlaneGeometry(beamWidth, beamLength);
+      const beamMat = new THREE.MeshBasicMaterial({ 
+        color: 0xFFFFFF, 
+        transparent: true, 
+        opacity: 0.9,
+        side: THREE.DoubleSide
+      });
+      beamMesh = new THREE.Mesh(beamGeom, beamMat);
+      beamMesh.position.set(playerGroup.position.x, playerGroup.position.y + beamLength / 2, 0);
+      scene.add(beamMesh);
+
+      // Beam particles
+      for (let i = 0; i < 20; i++) {
+        createParticle(
+          playerGroup.position.x + (Math.random() - 0.5) * beamWidth,
+          playerGroup.position.y + Math.random() * beamLength,
+          0,
+          0xFFFFFF,
+          0.3
+        );
+      }
+
+      // Camera shake
+      cameraShake = 0.3 + power * 0.3;
+
+      // Check hits
+      let hits = 0;
+      formations.forEach(f => {
+        f.group.children.forEach(enemy => {
+          if (!enemy.userData.alive) return;
+          const dist = Math.abs(enemy.position.x - playerGroup.position.x);
+          if (dist < beamWidth / 2 + 0.3) {
+            enemy.userData.alive = false;
+            enemy.visible = false;
+            hits++;
+            
+            // Hit particles
+            for (let i = 0; i < 15; i++) {
+              createParticle(enemy.position.x, enemy.position.y, enemy.position.z, 0xFFB347, 0.8);
+            }
+            
+            // Floating score
+            createFloatingText(enemy.position.x, enemy.position.y, `+${Math.floor(100 * power)}`);
+            playHitSound();
+          }
+        });
+
+        // Check if formation destroyed
+        const allDead = f.group.children.every(e => !e.userData.alive);
+        if (allDead && !formationDestroyed) {
+          formationDestroyed = true;
+          score += 1000 * f.level;
+          updateScore();
+          setTimeout(() => {
+            if (currentLevel < 5) {
+              currentLevel++;
+              createFormation(currentLevel);
+              updateLevel();
+            } else {
+              endGame(true);
+            }
+          }, 1500);
+        }
+      });
+
+      if (hits === 0) {
+        playMissSound();
+        createFloatingText(playerGroup.position.x, playerGroup.position.y + 2, "MISS");
+      }
+
+      // Fade beam
+      setTimeout(() => {
+        if (beamMesh) {
+          scene.remove(beamMesh);
+          beamMesh = null;
+        }
+      }, 100);
+    }
+
+    // Particles
+    function createParticle(x, y, z, color, speed) {
+      const geom = new THREE.SphereGeometry(0.08, 8, 8);
+      const mat = new THREE.MeshBasicMaterial({ color });
+      const mesh = new THREE.Mesh(geom, mat);
+      mesh.position.set(x, y, z);
+      mesh.userData = {
+        vx: (Math.random() - 0.5) * speed * 2,
+        vy: (Math.random() - 0.5) * speed * 2,
+        vz: (Math.random() - 0.5) * speed,
+        life: 1
+      };
+      scene.add(mesh);
+      particles.push(mesh);
+    }
+
+    function updateParticles(delta) {
+      particles = particles.filter(p => {
+        p.userData.life -= delta * 2;
+        if (p.userData.life <= 0) {
+          scene.remove(p);
+          return false;
+        }
+        p.position.x += p.userData.vx * delta;
+        p.position.y += p.userData.vy * delta;
+        p.position.z += p.userData.vz * delta;
+        p.material.opacity = p.userData.life;
+        p.scale.setScalar(p.userData.life);
+        return true;
+      });
+    }
+
+    // Floating text
+    function createFloatingText(x, y, text) {
+      const div = document.createElement('div');
+      div.style.cssText = `position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);
+        color:#FFB347;font-family:'Courier New',monospace;font-size:24px;font-weight:bold;
+        text-shadow:0 0 10px #FFB347;pointer-events:none;z-index:15;`;
+      div.textContent = text;
+      document.body.appendChild(div);
+      
+      floatingTexts.push({
+        el: div,
+        x, y,
+        life: 1,
+        vy: 2
+      });
+    }
+
+    function updateFloatingTexts(delta) {
+      floatingTexts = floatingTexts.filter(ft => {
+        ft.life -= delta;
+        ft.y += ft.vy * delta;
+        ft.el.style.transform = `translate(-50%,-50%) translate(${(ft.x * 50)}px,${(-ft.y * 30)}px)`;
+        ft.el.style.opacity = ft.life;
+        
+        if (ft.life <= 0) {
+          ft.el.remove();
+          return false;
+        }
+        return true;
+      });
+    }
+
+    // Audio
+    let chargeOsc = null;
+    let audioInitialized = false;
+
+    async function initAudio() {
+      if (audioInitialized) return;
+      try {
+        await Tone.start();
+        
+        // Charge oscillator
+        chargeOsc = new Tone.Oscillator(220, 'sawtooth').toDestination();
+        chargeOsc.volume.value = -20;
+        chargeOsc.start();
+        
+        audioInitialized = true;
+      } catch (e) {}
+    }
+
+    function updateChargeSound(power) {
+      if (!chargeOsc) return;
+      const freq = 220 + power * 440;
+      chargeOsc.frequency.rampTo(freq, 0.1);
+      chargeOsc.volume.value = -20 + power * 10;
+    }
+
+    function playFireSound() {
+      const noise = new Tone.NoiseSynth({
+        noise: { type: 'white' },
+        envelope: { attack: 0.001, decay: 0.1, sustain: 0 }
+      }).toDestination();
+      noise.triggerAttackRelease(0.05);
+      
+      const osc = new Tone.Oscillator(150, 'square').toDestination();
+      osc.volume.value = -10;
+      osc.frequency.rampTo(50, 0.1);
+      osc.start();
+      osc.stop(0.15);
+    }
+
+    function playHitSound() {
+      const synth = new Tone.Synth({
+        oscillator: { type: 'triangle' },
+        envelope: { attack: 0.01, decay: 0.2, sustain: 0 }
+      }).toDestination();
+      synth.triggerAttackRelease(880, '16n');
+      synth.triggerAttackRelease(1320, '16n', '8n');
+    }
+
+    function playMissSound() {
+      const osc = new Tone.Oscillator(80, 'sine').toDestination();
+      osc.volume.value = -5;
+      osc.frequency.rampTo(40, 0.2);
+      osc.start();
+      osc.stop(0.3);
+    }
+
+    function playLevelSound() {
+      const synth = new Tone.PolySynth(Tone.Synth, {
+        oscillator: { type: 'sine' },
+        envelope: { attack: 0.1, decay: 0.3, sustain: 0.5 }
+      }).toDestination();
+      synth.triggerAttackRelease(['C4', 'E4', 'G4'], '8n');
+      setTimeout(() => synth.triggerAttackRelease(['C5', 'E5'], '4n'), 200);
+    }
+
+    // UI Updates
+    function updateScore() {
+      document.getElementById('scoreVal').textContent = score;
+      document.getElementById('highVal').textContent = getHighScore();
+    }
+
+    function updateLevel() {
+      document.getElementById('levelVal').textContent = currentLevel;
+      playLevelSound();
+    }
+
+    function updateLives() {
+      document.getElementById('lives').textContent = '♥'.repeat(lives);
+    }
+
+    function updateChargeMeter(power) {
+      document.getElementById('chargeFill').style.width = (power * 100) + '%';
+    }
+
+    // Input
+    const mouse = new THREE.Vector2();
+    const rect = canvas.getBoundingClientRect();
+
+    function onPointerDown(e) {
+      if (gameState === 'start') {
+        gameState = 'playing';
+        document.getElementById('startScreen').classList.add('hidden');
+        initAudio().catch(() => {});
+        createFormation(1);
+        updateScore();
+        updateLives();
+        return;
+      }
+
+      if (gameState === 'credits') {
+        resetGame();
+        return;
+      }
+
+      if (gameState === 'playing' && !isCharging) {
+        isCharging = true;
+        charge = 0;
+      }
+    }
+
+    function onPointerUp(e) {
+      if (gameState !== 'playing') return;
+      
+      if (isCharging && charge > 0.1) {
+        fireBeam(charge);
+        playFireSound();
+      }
+      
+      isCharging = false;
+      charge = 0;
+      updateChargeMeter(0);
+      glowMat.opacity = 0;
+      if (chargeOsc) chargeOsc.volume.value = -30;
+    }
+
+    function onPointerMove(e) {
+      if (gameState !== 'playing') return;
+      
+      const rect = canvas.getBoundingClientRect();
+      mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      playerX = mouse.x * 6;
+    }
+
+    canvas.addEventListener('pointerdown', onPointerDown);
+    canvas.addEventListener('pointerup', onPointerUp);
+    canvas.addEventListener('pointercancel', onPointerUp);
+    canvas.addEventListener('pointermove', onPointerMove);
+
+    // Game flow
+    function endGame(won) {
+      gameState = 'credits';
+      saveHighScore(score);
+      
+      const credits = document.getElementById('creditsScreen');
+      const title = document.getElementById('endTitle');
+      const msg = document.getElementById('endMessage');
+      
+      title.textContent = won ? 'MISSION COMPLETE' : 'DEFEATED';
+      title.style.color = won ? '#00FF88' : '#FF6B6B';
+      msg.textContent = won ? 'The Swarm retreats... for now.' : 'The Swarm consumes all.';
+      
+      document.getElementById('endScore').textContent = `Score: ${score}`;
+      document.getElementById('endHigh').textContent = getHighScore();
+      credits.classList.add('active');
+    }
+
+    function resetGame() {
+      gameState = 'start';
+      score = 0;
+      lives = 3;
+      currentLevel = 1;
+      charge = 0;
+      isCharging = false;
+      
+      formations.forEach(f => scene.remove(f.group));
+      formations = [];
+      particles.forEach(p => scene.remove(p));
+      particles = [];
+      
+      document.getElementById('creditsScreen').classList.remove('active');
+      document.getElementById('startScreen').classList.remove('hidden');
+      updateScore();
+      updateLives();
+      updateLevel();
+    }
+
+    // Animation loop
+    const clock = new THREE.Clock();
+
+    function animate() {
+      requestAnimationFrame(animate);
+      
+      const delta = Math.min(clock.getDelta(), 0.1);
+      const time = clock.getElapsedTime();
+
+      if (gameState === 'playing') {
+        // Player movement
+        playerGroup.position.x += (playerX - playerGroup.position.x) * 5 * delta;
+        
+        // Charge buildup
+        if (isCharging) {
+          charge = Math.min(1, charge + delta * 0.8);
+          updateChargeMeter(charge);
+          updateChargeSound(charge);
+          
+          // Glow effect
+          glowMat.opacity = charge * 0.5;
+          glowMesh.scale.setScalar(1 + charge * 0.5);
+        }
+
+        // Ship breathing
+        shipMesh.scale.y = 1 + Math.sin(time * 2) * 0.05;
+        
+        // Update formations
+        updateFormations(time, delta);
+        
+        // Update particles
+        updateParticles(delta);
+        
+        // Update floating texts
+        updateFloatingTexts(delta);
+        
+        // Camera shake
+        if (cameraShake > 0) {
+          camera.position.x = (Math.random() - 0.5) * cameraShake;
+          camera.position.y = (Math.random() - 0.5) * cameraShake;
+          cameraShake *= 0.9;
+          if (cameraShake < 0.01) {
+            cameraShake = 0;
+            camera.position.x = 0;
+            camera.position.y = 0;
+          }
+        }
+
+        // Formation drift toward player (lose condition)
+        formations.forEach(f => {
+          f.group.position.y -= delta * 0.3;
+          if (f.group.position.y < -6) {
+            lives--;
+            updateLives();
+            createFormation(currentLevel);
+            
+            if (lives <= 0) {
+              endGame(false);
+            }
+          }
+        });
+      }
+
+      composer.render();
+    }
+
+    // Handle resize
+    window.addEventListener('resize', () => {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      renderer.setSize(w, h);
+      composer.setSize(w, h);
+      
+      const aspect = w / h;
+      camera.aspect = aspect;
+      if (aspect < 1) {
+        camera.position.z = 16;
+        camera.fov = 50;
+      } else {
+        camera.position.z = 12;
+        camera.fov = 60;
+      }
+      camera.updateProjectionMatrix();
+    });
+
+    // Initialize high score display
+    document.getElementById('highVal').textContent = getHighScore();
+
+    animate();
+  </script>
+</body>
+</html>
